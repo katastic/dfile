@@ -1,0 +1,7 @@
+{
+	"fileVersion": 1,
+	"versions": {
+		"crypto": "0.2.16",
+		"intel-intrinsics": "1.6.1"
+	}
+}
