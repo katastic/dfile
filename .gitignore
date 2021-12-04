@@ -1,0 +1,13 @@
+# intermediate libs
+*.a
+*.o
+
+# file tests
+*.out
+
+# snippet of https://github.com/github/gitignore/blob/master/D.gitignore
+# DUB
+.dub
+docs.json
+__dummy.html
+docs/

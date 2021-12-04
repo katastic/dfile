@@ -7,7 +7,9 @@ import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and imp
 /+
 	D equivalent of File Transfer 1.2j
 
-	 [ ] Figure out bug with binary files not working sometimes?
+	 [ ] Figure out bug with binary files not working sometimes? It appears to die after 96K has transfered! 
+			But server doesn't seem to notice or crash! Is it not sending the whole thing?
+
 	 [X] support less than one packet size [1024 byte] files
 	 [X] support changing files instead of hardcoded
 	 [ ] support multiple files
@@ -124,47 +126,55 @@ https://code.dlang.org/packages/dlib
 +/
 
 
-void server(string file_to_parse) {
-   import std.socket;
-   auto listener = new Socket(AddressFamily.INET, SocketType.STREAM);
-   listener.bind(new InternetAddress("localhost", port));
-   listener.listen(10);
-   auto readSet = new SocketSet();
-   Socket[] connectedClients;
-   char[1024] buffer;
-   bool isRunning = true;
-   while(isRunning) {
-       readSet.reset();
-       readSet.add(listener);
-       foreach(client; connectedClients) readSet.add(client);
-       if(Socket.select(readSet, null, null)) {
-          foreach(client; connectedClients)
-            if(readSet.isSet(client)) {
-                // read from it and echo it back
-                auto got = client.receive(buffer);
-                if(got == -1)break; // this was crashing here with -1 length
-                client.send(buffer[0 .. got]);
-            }
-          if(readSet.isSet(listener)) {
-             // the listener is ready to read, that means
-             // a new client wants to connect. We accept it here.
-             auto newSocket = listener.accept();
-    
+void server(string file_to_parse) 
+	{
+	import std.socket;
+	auto listener = new Socket(AddressFamily.INET, SocketType.STREAM);
+	listener.bind(new InternetAddress("localhost", port));
+	listener.listen(10);
+	auto readSet = new SocketSet();
+	Socket[] connectedClients;
+	char[1024] buffer;
+	bool isRunning = true;
+	while(isRunning) 
+		{
+		readSet.reset();
+		readSet.add(listener);
+		
+		foreach(client; connectedClients)
+			{readSet.add(client);}
+		
+		if(Socket.select(readSet, null, null)) 
+			{
+			foreach(client; connectedClients)
+				{
+				if(readSet.isSet(client)) 
+					{
+					// read from it and echo it back
+					auto got = client.receive(buffer);
+					if(got == -1)break; // this was crashing here with -1 length
+					client.send(buffer[0 .. got]);
+					}
+				}
+				
+			if(readSet.isSet(listener)) 
+				{
+				// the listener is ready to read, that means
+				// a new client wants to connect. We accept it here.
+				auto newSocket = listener.accept();    
 				readFile(file_to_parse, newSocket);     
-//             newSocket.send("Hello!\n"); // say hello
-
-             connectedClients ~= newSocket; // add to our list
-             
-             writeln("CONNECTION ATTACHED AND RUN.");
+				//             newSocket.send("Hello!\n"); // say hello
+				connectedClients ~= newSocket; // add to our list
+				writeln("CONNECTION ATTACHED AND RUN.");
+				}
 			}
-       }
        
-       // If we're done doing any messages, let's yield back to the CPU so we don't 100% the core
+		// If we're done doing any messages, let's yield back to the CPU so we don't 100% the core
 		sched_yield(); //one, other, or both?
 		import core.thread;
 		Thread.sleep( dur!("msecs")(1) ); 
-   }
-}
+		}
+	}
 
 void client() 
 	{
@@ -186,28 +196,25 @@ void client()
     writeln("Server said: [", buffer[0 .. received],"]");
 	writeln("recieved length was: ", received);
 
-socket.blocking(false); //after first packet keep going to we run out.
+	socket.blocking(false); //after first packet keep going to we run out.
     
 
-ubyte filename_length = 0;
-char[] _filename;
-ulong filesize;
+	ubyte filename_length = 0;
+	char[] filename;
+	ulong filesize;
 
-   if(buffer[0] != 'F') //file packet
+	if(buffer[0] != 'F') //file packet
 		{
 		writeln("PACKET ERROR");
 		return;
-		}else
-		{
+		}else{
 		number_of_packets++;
 		//ubyte[] size_str = cast(ubyte[])(buffer[1..9].idup); //why idup required: https://forum.dlang.org/thread/bgkklxwbhrqdhvethnco@forum.dlang.org
 		//ulong size = size_str.read!ulong; 
 		filename_length = buffer[1];
 		writeln("FILENAME length: ", filename_length);
-	
-		_filename = buffer[2 .. filename_length + 2];
-	
-		writefln("FILENAME [%s]", _filename);
+		filename = buffer[2 .. filename_length + 2];
+		writefln("FILENAME [%s]", filename);
 	
 		filesize = 
 			buffer[2+filename_length] + 
@@ -236,22 +243,22 @@ ulong filesize;
 	do{
 	char[1024] buffer2;
 	auto len2 = socket.receive(buffer2);
-		{
-		if (len2 != -1)
+
+		if(len2 != -1)
 			{
 // DEBUG
-//			writeln("Server said: [", buffer2[0 .. len2],"]");
-			writeln("recieved length was: ", len2);	
-			number_of_packets++;
-			
-			abuffer ~= cast(char[])(buffer2[0 .. len2]); 
-			single_packet = false;
-			writeln("END OF PACKET ---------------------------------------------------");
-			}else{
-			writeln("we're done here!");
-			break;
-			}
+//		writeln("Server said: [", buffer2[0 .. len2],"]");
+		writeln("recieved length was: ", len2);	
+		number_of_packets++;
+		
+		abuffer ~= cast(char[])(buffer2[0 .. len2]); 
+		single_packet = false;
+		writeln("END OF PACKET ---------------------------------------------------");
+		}else{
+		writeln("we're done here!");
+		break;
 		}
+
 	}while(true);
 
 	import std.format;
@@ -280,7 +287,7 @@ ulong filesize;
 
 	sw2.start();
 		import std.file;	
-		string output_filename = format("%s.out", _filename);
+		string output_filename = format("%s.out", filename);
 		writefln("WRITING FILE %s", output_filename);
 		std.file.write(output_filename, total_buffer);	
 	sw2.stop();
