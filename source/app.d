@@ -1,6 +1,6 @@
 
 
-immutable ushort port = 2532;
+immutable ushort port = 2533;
 
 import std.datetime;
 import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and important (see docs)
@@ -19,6 +19,16 @@ import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and imp
 					TCP is supposed to be STREAM oriented!
 					Am I ... using UDP by accident?
 						- No! We're using SocketType.STREAM!
+						
+				Maybe we can SEND TONS but we have to specify "packets" anyway?
+				
+					https://www.google.com/search?channel=fs&client=ubuntu&q=tcp+socket+send+max+size
+
+					here it says the send window could be 1 GB of bytes!
+					
+					but the SEND BUFFER SIZE could be 32768???
+					
+					https://www3.physnet.uni-hamburg.de/physnet/Tru64-Unix/HTML/APS2WDTE/DOCU_003.HTM
 
 		OH SHIT. anything of payload >= 68470 triggers it HOWEVER slightly smaller
 		SOMETIMES. TRIGGERS. IT.
@@ -225,7 +235,7 @@ void client()
     writeln("Server said: [", buffer[0 .. received],"]");
 	writeln("recieved length was: ", received);
 
-	socket.blocking(false); //after first packet keep going to we run out.
+	socket.blocking(true); //after first packet keep going to we run out.
     
 
 	ubyte filename_length = 0;
@@ -277,7 +287,8 @@ void client()
 			{
 // DEBUG
 //		writeln("Server said: [", buffer2[0 .. len2],"]");
-		writeln("recieved length was: ", len2);	
+		writeln("recieved length was: ", len2);
+		if(len2 == 0)break;	
 		number_of_packets++;
 		
 		abuffer ~= cast(char[])(buffer2[0 .. len2]); 
@@ -395,7 +406,18 @@ void readFile(string filename, Socket mySocket)
 			writeln(format("%b", x.length));
 			
 			string payload = format("F%r%r%r%r", cast(ubyte)filename.length, filename, x.length, x[0 .. $]);
-			mySocket.send(payload);
+			
+			for(int i = 0; i < payload.length; i += 1024)
+				{
+				if(i+1024 < payload.length)
+					{
+					writefln("sending from %d to %d", i , i+1024); 
+					mySocket.send(payload[i .. i+1024]);
+					}else{
+					writefln("sending from %d to %d", i , payload.length); 
+					mySocket.send(payload[i .. payload.length]);
+					}
+				}
 			// do we need to chop up packets here? can't we just dump the whole thing into the channel / stream?
 
 	} catch(Exception e)
