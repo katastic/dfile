@@ -1,6 +1,6 @@
 
-
-immutable ushort port = 2533;
+bool using_compressed = true;
+immutable ushort port = 2503;
 
 import std.datetime;
 import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and important (see docs)
@@ -8,9 +8,14 @@ import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and imp
 /+
 	D equivalent of File Transfer 1.2j
 	
-	 [ ] Figure out bug with binary files not working sometimes? It appears to die after 96K has transfered! 
+		
+	 [ ] CLIENT should NOT use blocking, but keep scanning until it thinks it has enough data!
+			That way, server can fill window / buffer faster than client, and
+			 client can empty the whole thing and not terminate.
+	
+	
+	 [X] Figure out bug with binary files not working sometimes? It appears to die after 96K has transfered! 
 			But server doesn't seem to notice or crash! Is it not sending the whole thing?
-
 
 			--> AM I HITTING TCP SEGMENT LIMIT?
 				
@@ -57,14 +62,20 @@ import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and imp
 	 [ ] specify output directory
 	 [ ] preserve EXECUTE/READONLY bit and others
 	 [ ] custom port and ip address for remote computers!
+	 [ ] protocol for sending compressed files
+		[ ] encrypted files
+
 
 need to PACK FILENAME into header.
 
+F*myfile.txt****datadatadatadatadatadata
+
 'F'
+'N'/'C'	- (N)ormal, (C)ompressed			(also what about encrypted ala X=N+E, Y=C+E)
 	5 - ubyte (up to 256 character file name, what about PATH?)
 	'myfile.txt' - char[] of ubyte length no quotes
 
-	1234 - ulong (binary) - total size of file (and packet header or just file?)
+	1234 - ulong (binary) - total size of file 
 	[data payload] - ubyte[] of ulong length
 
 	- failure modes. 
@@ -157,7 +168,6 @@ https://code.dlang.org/packages/dlib
 
 +/
 
-
 void server(string file_to_parse) 
 	{
 	import std.socket;
@@ -235,33 +245,38 @@ void client()
     writeln("Server said: [", buffer[0 .. received],"]");
 	writeln("recieved length was: ", received);
 
-	socket.blocking(true); //after first packet keep going to we run out.
-    
+	socket.blocking(false); //after first packet keep going to we run out.
 
 	ubyte filename_length = 0;
 	char[] filename;
 	ulong filesize;
+	bool is_normal_file = true;
 
 	if(buffer[0] != 'F') //file packet
 		{
 		writeln("PACKET ERROR");
 		return;
 		}else{
+		if(buffer[1] == 'N'){is_normal_file = true; }
+		if(buffer[1] == 'C'){is_normal_file = false;}
+		if(! (buffer[1] == 'N' || buffer[1] == 'C') ){writeln("PACKET ERROR 2"); return;}
+		writeln("is_normal_file: ", is_normal_file);
+		
 		number_of_packets++;
 		//ubyte[] size_str = cast(ubyte[])(buffer[1..9].idup); //why idup required: https://forum.dlang.org/thread/bgkklxwbhrqdhvethnco@forum.dlang.org
 		//ulong size = size_str.read!ulong; 
-		filename_length = buffer[1];
+		filename_length = buffer[1+1];
 		writeln("FILENAME length: ", filename_length);
-		filename = buffer[2 .. filename_length + 2];
+		filename = buffer[2+1 .. filename_length + 2 + 1];
 		writefln("FILENAME [%s]", filename);
 	
 		filesize = 
-			buffer[2+filename_length] + 
-			buffer[3+filename_length]*256^^1 + 
-			buffer[4+filename_length]*256^^2 + 
-			buffer[5+filename_length]*256^^3; 
+			buffer[2+1+filename_length] + 
+			buffer[3+1+filename_length]*256^^1 + 
+			buffer[4+1+filename_length]*256^^2 + 
+			buffer[5+1+filename_length]*256^^3; 
 		
-		writefln("FILE PACKET RECIEVED of size: %d %d %d %d", buffer[1], buffer[2], buffer[3], buffer[4]);
+		writefln("FILE PACKET RECIEVED of size: %d %d %d %d", buffer[1+1], buffer[2+1], buffer[3+1], buffer[4+1]);
 		writefln("filesize: %d", filesize);
 		// NOTE: Not required to be PACKET SIZE (currently 1024 chunks)
 	
@@ -273,64 +288,84 @@ void client()
 	writeln("END OF PACKET ---------------------------------------------------");
 		
 	string total_buffer;
-		
 	import std.conv;
 	char[] abuffer; //accumulation buffer
-
 	bool single_packet = true;
 	
+	// SECOND PACKET AND FOLLOWING
+	// --------------------------------------------------------------------------
 	do{
-	char[1024] buffer2;
-	auto len2 = socket.receive(buffer2);
+		char[1024] buffer2;
+		auto len2 = socket.receive(buffer2);
 
 		if(len2 != -1)
 			{
-// DEBUG
-//		writeln("Server said: [", buffer2[0 .. len2],"]");
-		writeln("recieved length was: ", len2);
-		if(len2 == 0)break;	
-		number_of_packets++;
-		
-		abuffer ~= cast(char[])(buffer2[0 .. len2]); 
-		single_packet = false;
-		writeln("END OF PACKET ---------------------------------------------------");
-		}else{
-		writeln("we're done here!");
-		break;
-		}
+	// DEBUG
+	//		writeln("Server said: [", buffer2[0 .. len2],"]");
+			writeln("recieved length was: ", len2);
+			if(len2 == 0)break;	
+			number_of_packets++;
+			
+			abuffer ~= cast(char[])(buffer2[0 .. len2]); 
+			
+			if(buffer.length + abuffer.length >= 1 + 1 + 8 + 1 + filename_length + filesize)
+				{
+					
+				writeln("hanging up!");
+				break;
+				}else{
+				writefln("BUFFER LENGTH %d of %d", buffer.length + abuffer.length
+					,  1 + 1 + 8 + 1 + filename_length + filesize);
+				}
+			
+			single_packet = false;
+			writeln("END OF PACKET ---------------");
+			}else{
+			writeln("we're done here!");
+			break;
+			}
 
 	}while(true);
 
 	import std.format;
 	
 	// note we start at 2 to remove the file size header.
-	// TODO: WHY IS THE START AT 9.
-	// F1234 = 5 (or 4 starting from 0)
+	// TODO: WHY IS THE START AT 9+1.
+	// FN1234 = 5 (or 4 starting from 0)
 	// wait, am I using 8 bytes for size? ala 64-bit?
 	// oh shit, ulong, 8 bytes. wait, ulong... is 64-bit? OH, IT IS, on 64-bit systems even with C. Didn't realize!
 	
 	if(!single_packet)
 		{
-		total_buffer = to!string(buffer[ 1 + 8 + 1 + filename_length  ..  1024]) ~ to!string(abuffer); //format("%s%s", buffer[2 .. received], buffer2[0 .. len2]);
+		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1024]) ~ to!string(abuffer); //format("%s%s", buffer[2 .. received], buffer2[0 .. len2]);
 		}else{
-		total_buffer = to!string(buffer[ 1 + 8 + 1 + filename_length  ..  1 + 8 + 1 + filename_length + filesize]); 
+		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1 + 1 + 8 + 1 + filename_length + filesize]); 
 		}
+		
+	socket.close();
 	sw.stop(); //let's not count STDOUT time.
 
+	string output;
+	if(!is_normal_file)
+		{
+		output = cast(string)uncompress(total_buffer);
+		}else{
+		output = total_buffer;
+		}
 	writeln("TOTAL PACKET");
 	writeln("==========================================================================");
 //DEBUG
-	writeln(total_buffer);
+	writeln(output);
 	writeln("==========================================================================");
 	writeln("Packet count: ", number_of_packets);
-	writeln("Payload: ", total_buffer.length);
-	writeln("Payload with HEADER: ", total_buffer.length + 1 + 8 + 1 + filename_length);
+	writeln("Payload: ", output.length);
+	writeln("Payload with HEADER: ", 1 + 1 + 8 + 1 + filename_length + output.length);
 
 	sw2.start();
 		import std.file;	
 		string output_filename = format("%s.out", filename);
 		writefln("WRITING FILE %s", output_filename);
-		std.file.write(output_filename, total_buffer);	
+		std.file.write(output_filename, output);	
 	sw2.stop();
 	
 	writefln("Net time [%d] ms", sw.peek.total!"msecs");
@@ -365,12 +400,13 @@ void readFile(string filename, Socket mySocket)
 		writeln( "COMPRESSION");
 		writeln( "------------------------------------------------" );
 		auto x = read(filename);
-		/*
-		writeln( x.length / 1024, "K");
-		auto y = std.zlib.compress( x, 9 );
-		writeln ( y.length / 1024, "K");
 		
+		writeln( x.length);
+		auto y = std.zlib.compress( x, 9 );
+		writeln ( y.length);
 		writeln ( "ratio: ", to!float(y.length)/ to!float(x.length));
+		
+		/*
 		
 		writeln();
 		writeln( "ENCRYPTION");
@@ -398,15 +434,21 @@ void readFile(string filename, Socket mySocket)
 //		writeln("x:      ", x);
 		*/
 	import std.format;
+	string payload;
+	
 	writeln("SENDING DATA");
 	writeln("----------------------------------------------");
 			writeln("length was: ", x.length);
 			writeln(typeid(x.length));
 			writeln(x.length.sizeof);
 			writeln(format("%b", x.length));
-			
-			string payload = format("F%r%r%r%r", cast(ubyte)filename.length, filename, x.length, x[0 .. $]);
-			
+
+			if(using_compressed == false)
+				payload = format("FN%r%r%r%r", cast(ubyte)filename.length, filename, x.length, x[0 .. $]);
+			else
+				payload = format("FC%r%r%r%r", cast(ubyte)filename.length, filename, y.length, y[0 .. $]);
+				// note we're using y and y.length, not x here
+					
 			for(int i = 0; i < payload.length; i += 1024)
 				{
 				if(i+1024 < payload.length)
@@ -420,11 +462,9 @@ void readFile(string filename, Socket mySocket)
 				}
 			// do we need to chop up packets here? can't we just dump the whole thing into the channel / stream?
 
-	} catch(Exception e)
-		{ //why doesn't this catch with a FileException like the online guide? //https://tour.dlang.org/tour/en/basics/exceptions
+		} catch(Exception e) { //why doesn't this catch with a FileException like the online guide? //https://tour.dlang.org/tour/en/basics/exceptions
 		writeln("Exception: ", e);
 		}
-	
 	}
 
 int main(string[] args)
