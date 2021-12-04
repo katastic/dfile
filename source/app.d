@@ -1,4 +1,5 @@
 
+
 immutable ushort port = 2532;
 
 import std.datetime;
@@ -6,9 +7,34 @@ import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and imp
 
 /+
 	D equivalent of File Transfer 1.2j
-
+	
 	 [ ] Figure out bug with binary files not working sometimes? It appears to die after 96K has transfered! 
 			But server doesn't seem to notice or crash! Is it not sending the whole thing?
+
+
+			--> AM I HITTING TCP SEGMENT LIMIT?
+				
+				>>OMFG<< am I sending a SINGLE PACKET and not using a connection stream?
+				Did I have it right the first time and remove it?
+					TCP is supposed to be STREAM oriented!
+					Am I ... using UDP by accident?
+						- No! We're using SocketType.STREAM!
+
+		OH SHIT. anything of payload >= 68470 triggers it HOWEVER slightly smaller
+		SOMETIMES. TRIGGERS. IT.
+
+			Packet Count: 67
+			Payload: 68470
+			Payload with HEADER: 68488
+
+			Packet count: 32
+			Payload: 32750
+			Payload with HEADER: 32768		(snipped at 1/2 of 16-bit boundary 65536?)
+		
+			almost 50/50% of it happening. 
+			with a file exactly 68470 bytes. (add 18 bytes for the HEADER)
+			with filename of [helper.d] (the length of the string matters)
+			
 
 	 [X] support less than one packet size [1024 byte] files
 	 [X] support changing files instead of hardcoded
@@ -30,10 +56,6 @@ need to PACK FILENAME into header.
 
 	1234 - ulong (binary) - total size of file (and packet header or just file?)
 	[data payload] - ubyte[] of ulong length
-
-
-
-
 
 	- failure modes. 
 		- check if destination HDD has space first.
@@ -152,7 +174,13 @@ void server(string file_to_parse)
 					{
 					// read from it and echo it back
 					auto got = client.receive(buffer);
-					if(got == -1)break; // this was crashing here with -1 length
+					if(got == -1)
+						{
+						writeln("SOMETHING ODD HAPPENED. buffer -1 length.");
+						// is this because we hung up? or is it breaking somehow?
+						// is client closing connection after 96 packets?
+						break; // this was crashing here with -1 length
+						}
 					client.send(buffer[0 .. got]);
 					}
 				}
@@ -162,10 +190,11 @@ void server(string file_to_parse)
 				// the listener is ready to read, that means
 				// a new client wants to connect. We accept it here.
 				auto newSocket = listener.accept();    
+				writeln("CONNECTION STARTED");
 				readFile(file_to_parse, newSocket);     
-				//             newSocket.send("Hello!\n"); // say hello
+				// newSocket.send("Hello!\n"); // say hello
 				connectedClients ~= newSocket; // add to our list
-				writeln("CONNECTION ATTACHED AND RUN.");
+				writeln("CONNECTION SENT/FINISHED.");
 				}
 			}
        
@@ -284,6 +313,7 @@ void client()
 	writeln("==========================================================================");
 	writeln("Packet count: ", number_of_packets);
 	writeln("Payload: ", total_buffer.length);
+	writeln("Payload with HEADER: ", total_buffer.length + 1 + 8 + 1 + filename_length);
 
 	sw2.start();
 		import std.file;	
