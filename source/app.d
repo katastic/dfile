@@ -1,82 +1,58 @@
 
-bool using_compressed = true;
-immutable ushort port = 2503;
-
-import std.datetime;
-import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and important (see docs)
+/+
+	we could add zstd compression support through DUB as well as command line.
++/
 
 /+
 	D equivalent of File Transfer 1.2j
 	
-		
-	 [ ] CLIENT should NOT use blocking, but keep scanning until it thinks it has enough data!
+	[X]? CLIENT should NOT use blocking, but keep scanning until it thinks it has enough data!
 			That way, server can fill window / buffer faster than client, and
 			 client can empty the whole thing and not terminate.
 	
-	
-	 [X] Figure out bug with binary files not working sometimes? It appears to die after 96K has transfered! 
+	[X] Figure out bug with binary files not working sometimes? It appears to die after 96K has transfered! 
 			But server doesn't seem to notice or crash! Is it not sending the whole thing?
-
-			--> AM I HITTING TCP SEGMENT LIMIT?
-				
-				>>OMFG<< am I sending a SINGLE PACKET and not using a connection stream?
-				Did I have it right the first time and remove it?
-					TCP is supposed to be STREAM oriented!
-					Am I ... using UDP by accident?
-						- No! We're using SocketType.STREAM!
-						
-				Maybe we can SEND TONS but we have to specify "packets" anyway?
-				
-					https://www.google.com/search?channel=fs&client=ubuntu&q=tcp+socket+send+max+size
-
-					here it says the send window could be 1 GB of bytes!
-					
-					but the SEND BUFFER SIZE could be 32768???
-					
-					https://www3.physnet.uni-hamburg.de/physnet/Tru64-Unix/HTML/APS2WDTE/DOCU_003.HTM
-
-		OH SHIT. anything of payload >= 68470 triggers it HOWEVER slightly smaller
-		SOMETIMES. TRIGGERS. IT.
-
-			Packet Count: 67
-			Payload: 68470
-			Payload with HEADER: 68488
-
-			Packet count: 32
-			Payload: 32750
-			Payload with HEADER: 32768		(snipped at 1/2 of 16-bit boundary 65536?)
-		
-			almost 50/50% of it happening. 
-			with a file exactly 68470 bytes. (add 18 bytes for the HEADER)
-			with filename of [helper.d] (the length of the string matters)
 			
-
-	 [X] support less than one packet size [1024 byte] files
-	 [X] support changing files instead of hardcoded
-	 [ ] support multiple files
+	[X] support less than one packet size [1024 byte] files
+	[X] support changing files instead of hardcoded
+	[ ] support multiple files
 		-> just support bash enumeration of all args after the command ones. Each one a file.
 		ala  
 			dfile -s [ports/etc new options] onefile 
 			dfile -s [ports/etc new options] onefile twofile threefile fourfile
-	 [ ] support directories
-	 [ ] specify output directory
-	 [ ] preserve EXECUTE/READONLY bit and others
-	 [ ] custom port and ip address for remote computers!
-	 [ ] protocol for sending compressed files
+	[ ] support directories
+	[ ] specify output directory
+	[ ] preserve EXECUTE/READONLY bit and others
+	[ ] custom port and ip address for remote computers!
+	[X] protocol for sending compressed files
 		[ ] encrypted files
+	[ ] UDP support
+	[X] need to PACK FILENAME into header.
+	[ ] implement getopt for command line stuff
+	
+	[ ] Automatic not send compressed files if they're bigger ala File Transfer 1.2j
+		though I doubt the compression will ever get MUCH bigger so maybe that doesn't matter
+		except for saving CPU time. [not bandwidth]
+
+	PROTOCOL:
+	
+		FN1myfile.txt1243datadatadatadatadatadata
+
+			'F'	file packet [as opposed to chat or whatever]
+
+			'N'/'C'	- (N)ormal, (C)ompressed		  (X) (Y)	(also what about encrypted ala X=N+E, Y=C+E)
+
+			1 - ubyte (up to 256 character file name, what about PATH?)
+
+			'myfile.txt' - char[] of ubyte length no quotes
+
+			1234 - ulong (binary) - total size of file 
+
+			[data payload] - ubyte[] of ulong length
 
 
-need to PACK FILENAME into header.
+		- what about if we support other compression methods like zstd? How will protocol change?
 
-F*myfile.txt****datadatadatadatadatadata
-
-'F'
-'N'/'C'	- (N)ormal, (C)ompressed			(also what about encrypted ala X=N+E, Y=C+E)
-	5 - ubyte (up to 256 character file name, what about PATH?)
-	'myfile.txt' - char[] of ubyte length no quotes
-
-	1234 - ulong (binary) - total size of file 
-	[data payload] - ubyte[] of ulong length
 
 	- failure modes. 
 		- check if destination HDD has space first.
@@ -85,8 +61,6 @@ F*myfile.txt****datadatadatadatadatadata
 		- missing files after adding them on SENDER.
 
 https://github.com/msgpack/msgpack-d
-
-
 https://stackoverflow.com/questions/25634483/send-binary-file-over-tcp-ip-connection
 https://stackoverflow.com/questions/7697538/sending-binary-files-through-tcp-sockets-c?rq=1
 
@@ -136,7 +110,8 @@ packet:
 
  
  pause/resume on CRASH
-	[ ] keep file list and server info [careful with passwords though who gives a shit, it's a pw for this one transfer] 
+	[ ] keep file list and server info [careful with passwords though who gives a shit, 
+			it's a pw for this one transfer] 
 		and allow option to resume	
 		"job"
 	
@@ -162,17 +137,28 @@ https://code.dlang.org/packages/dlib
 					https://en.wikipedia.org/wiki/Brotli
 					designed for text files.
 					
-	- Encryption
-
-	wait does Dlang finally support COMPRESSION too?
-
 +/
+
+import std.datetime;
+import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and important (see docs)
+import crypto.aes;
+import crypto.padding;
+import std.stdio;
+import std.socket;
+import std.file; 
+import std.zlib;
+import std.conv;
+import std.string;
+
+//#include <sys/sendfile.h>
+extern(C)  ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
+extern(C)  int sched_yield(); // include <sched.h>
 
 void server(string file_to_parse) 
 	{
 	import std.socket;
 	auto listener = new Socket(AddressFamily.INET, SocketType.STREAM);
-	listener.bind(new InternetAddress("localhost", port));
+	listener.bind(new InternetAddress( ip_string, port));
 	listener.listen(10);
 	auto readSet = new SocketSet();
 	Socket[] connectedClients;
@@ -227,20 +213,20 @@ void server(string file_to_parse)
 
 void client() 
 	{
+    import std.socket, std.stdio;
+    import std.bitmanip;
+
 	StopWatch sw;
 	StopWatch sw2;
 	sw.start();
 	
 	int number_of_packets = 0;
-    import std.socket, std.stdio;
-    import std.bitmanip;
+    char[1024] buffer;
     
     auto socket = new Socket(AddressFamily.INET,  SocketType.STREAM);
-    
-    socket.connect(new InternetAddress("localhost", port));   
-        
-    char[1024] buffer;
+    socket.connect(new InternetAddress(ip_string, port));   
     auto received = socket.receive(buffer); // wait for the server to say hello
+
 	if(received == -1){writeln("no packet! bailing out."); return;} //this shouldn't fire off when using blocking
     writeln("Server said: [", buffer[0 .. received],"]");
 	writeln("recieved length was: ", received);
@@ -257,8 +243,8 @@ void client()
 		writeln("PACKET ERROR");
 		return;
 		}else{
-		if(buffer[1] == 'N'){is_normal_file = true; }
-		if(buffer[1] == 'C'){is_normal_file = false;}
+		if(buffer[1] == 'N'){is_normal_file = true; writeln("starting a NORMAL file transfer!");}
+		if(buffer[1] == 'C'){is_normal_file = false; writeln("starting a COMPRESSED file transfer!");}
 		if(! (buffer[1] == 'N' || buffer[1] == 'C') ){writeln("PACKET ERROR 2"); return;}
 		writeln("is_normal_file: ", is_normal_file);
 		
@@ -277,12 +263,7 @@ void client()
 			buffer[5+1+filename_length]*256^^3; 
 		
 		writefln("FILE PACKET RECIEVED of size: %d %d %d %d", buffer[1+1], buffer[2+1], buffer[3+1], buffer[4+1]);
-		writefln("filesize: %d", filesize);
-		// NOTE: Not required to be PACKET SIZE (currently 1024 chunks)
-	
-		// 1448 bytes max size with default MTU of 1500
-		// https://superuser.com/questions/1341012/practical-vs-theoretical-max-limit-of-tcp-packet-size
-		// 9000 with common type of jumbo frames
+		writefln("filesize: %d", filesize);	
 		}
 	
 	writeln("END OF PACKET ---------------------------------------------------");
@@ -305,12 +286,10 @@ void client()
 			writeln("recieved length was: ", len2);
 			if(len2 == 0)break;	
 			number_of_packets++;
-			
 			abuffer ~= cast(char[])(buffer2[0 .. len2]); 
 			
 			if(buffer.length + abuffer.length >= 1 + 1 + 8 + 1 + filename_length + filesize)
 				{
-					
 				writeln("hanging up!");
 				break;
 				}else{
@@ -329,17 +308,12 @@ void client()
 
 	import std.format;
 	
-	// note we start at 2 to remove the file size header.
-	// TODO: WHY IS THE START AT 9+1.
-	// FN1234 = 5 (or 4 starting from 0)
-	// wait, am I using 8 bytes for size? ala 64-bit?
-	// oh shit, ulong, 8 bytes. wait, ulong... is 64-bit? OH, IT IS, on 64-bit systems even with C. Didn't realize!
-	
 	if(!single_packet)
 		{
-		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1024]) ~ to!string(abuffer); //format("%s%s", buffer[2 .. received], buffer2[0 .. len2]);
+		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1024]) ~ to!string(abuffer);
 		}else{
-		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1 + 1 + 8 + 1 + filename_length + filesize]); 
+		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..
+										 1 + 1 + 8 + 1 + filename_length + filesize]); 
 		}
 		
 	socket.close();
@@ -352,6 +326,7 @@ void client()
 		}else{
 		output = total_buffer;
 		}
+
 	writeln("TOTAL PACKET");
 	writeln("==========================================================================");
 //DEBUG
@@ -370,21 +345,15 @@ void client()
 	
 	writefln("Net time [%d] ms", sw.peek.total!"msecs");
 	writefln("File write time [%d] ms", sw2.peek.total!"msecs");
+	
+	if(!is_normal_file)
+		{
+		writefln("compressed (sent) size: %d", total_buffer.length);		
+		writefln("extracted         size: %d",  output.length);
+		if(total_buffer.length != 0)writefln("ratio: %d",  output.length / total_buffer.length);		
+		writefln("saved: %d bytes",  output.length - total_buffer.length);		
+		}
 	}
-
-import crypto.aes;
-import crypto.padding;
-
-import std.stdio;
-import std.socket;
-import std.file; 
-
-import std.zlib;
-import std.conv;
-
-//#include <sys/sendfile.h>
-extern(C)  ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
-extern(C)  int sched_yield(); // include <sched.h>
 
 
 void readFile(string filename, Socket mySocket)
@@ -397,14 +366,17 @@ void readFile(string filename, Socket mySocket)
 	*/
 	
 	try{
-		writeln( "COMPRESSION");
-		writeln( "------------------------------------------------" );
 		auto x = read(filename);
+
+		writeln("COMPRESSION");
+		writeln("------------------------------------------------" );
 		
-		writeln( x.length);
+		writeln(x.length);
 		auto y = std.zlib.compress( x, 9 );
-		writeln ( y.length);
-		writeln ( "ratio: ", to!float(y.length)/ to!float(x.length));
+		writeln (y.length);
+		writeln ("Compression ratio: ", to!float(y.length) / to!float(x.length));
+		
+		//TODO FIXME: only run compression when we're using it!
 		
 		/*
 		
@@ -467,9 +439,68 @@ void readFile(string filename, Socket mySocket)
 		}
 	}
 
+bool is_server = false;
+bool is_client = false;
+string client_string = "";
+string ip_string = "127.0.0.1";
+//uint ip = -1;
+ushort port = 8000;
+bool using_compressed = true;
+
+import std.getopt;
+
 int main(string[] args)
 	{
+	//https://dlang.org/phobos/std_getopt.html#.GetoptResult
+	auto helpInformation = getopt(args,
+		std.getopt.config.bundling, // allow combined arguments -cpzspfnapsfon
+		"s", "run as server", &is_server,
+		"c", "run as client (specify IP to connect to, e.g. -c=192.168.1.1) ", &client_string,
+		"p", "specify port (default: 8000)", &port,
+		"z", "use compression (default: yes)", &using_compressed
+	);
 	
+	if(client_string != "")
+		{
+		is_client = true;
+		ip_string = client_string;
+	/*	
+		string ip = ip_string;
+			import std.algorithm : splitter, map;
+		import std.range : take;
+		import std.conv  : to;
+		import std.array : array;
+
+ubyte[4] parts = ip
+			.splitter('.')
+			.take(4)
+			.map!((a) => a.to!ubyte)
+			.array;
+		*/
+		//uint addr = cast(uint)parts[0..4];
+//		uint addr = *cast(uint*)parts.ptr; // this is ugly as hell, is this the best way?
+		}
+	
+	if(is_server && is_client){writeln("fuck you.");}
+		
+	if(is_client)
+		{
+		client();
+		}
+
+	if(is_server)
+		{
+		server(args[1]); //getopt REMOVES ARGS that are recognized and leaves the rest!
+		}
+		
+	if (helpInformation.helpWanted)
+		{
+		defaultGetoptPrinter("Some information about the program.", helpInformation.options);
+		return 0;
+		}
+		
+		/+
+		
 	if(args.length == 1){writeln("no file specified and piping doesn't work yet. \n\nUsage: \n  -c \n  -s FILENAME"); return -1;}
 	if(args.length == 2)
 		{
@@ -481,6 +512,7 @@ int main(string[] args)
 			return 2;
 			}
 		}
+		
 	if(args.length == 3) // -s [FILENAME]
 		{
 		writeln(args[1]);
@@ -491,6 +523,6 @@ int main(string[] args)
 			server(args[2]);
 			}
 		}
-	
+	+/
 	return 0; 
 	}
