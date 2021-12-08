@@ -1,19 +1,15 @@
 import std.datetime;
-import std.datetime.stopwatch : benchmark, StopWatch; //this is separate and important (see docs)
-import crypto.aes;
-import crypto.padding;
+import std.datetime.stopwatch : benchmark, StopWatch; //this line is separate from std.datetime and important (see docs)
 import std.stdio, std.format, std.string;
-import std.socket;
-import std.file; 
-import std.conv;
-import std.bitmanip;
+import std.file, std.socket;
+import std.conv, std.bitmanip;
 import std.zlib;
+import crypto.aes, crypto.padding;
 
-//#include <sys/sendfile.h>
-extern(C)  ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
-extern(C)  int sched_yield(); // include <sched.h>
+extern(C) ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count); //#include <sys/sendfile.h>
+extern(C) int sched_yield(); // include <sched.h>
 
-void server(string file_to_parse) 
+void server(string file_to_parse, string ip_string, ushort port) 
 	{
 	auto listener = new Socket(AddressFamily.INET, SocketType.STREAM);
 	listener.bind(new InternetAddress(ip_string, port));
@@ -56,7 +52,7 @@ void server(string file_to_parse)
 						}
 					client.send(buffer[0 .. got]);
 					}
-				import core.thread;
+				import core.thread : Thread;
 				Thread.sleep( dur!("msecs")(3) );  // don't use all my CPU waiting!!!
 				}
 				
@@ -75,15 +71,13 @@ void server(string file_to_parse)
        
 		// If we're done doing any messages, let's yield back to the CPU so we don't 100% the core
 //		sched_yield(); //one, other, or both?
-		import core.thread;
+		import core.thread : Thread;
 		Thread.sleep( dur!("msecs")(0) ); 
 		}
 	}
 
-void client() 
+void client(string ip_string, ushort port) 
 	{
-
-
 	StopWatch sw;
 	StopWatch sw2;
 	StopWatch sw3;
@@ -101,7 +95,7 @@ void client()
   //  writeln("Server said: [", buffer[0 .. received],"]");
 	writeln("recieved length was: ", received);
 
-	socket.blocking(false); //after first packet keep going to we run out.
+	socket.blocking(false); //after first packet keep going to we run out. ?
 
 	ubyte filename_length = 0;
 	char[] filename;
@@ -139,7 +133,7 @@ void client()
 	writeln("END OF PACKET ---------------------------------------------------");
 		
 	string total_buffer;
-	import std.conv;
+	import std.conv : to;
 	char[] abuffer; //accumulation buffer
 	bool single_packet = true;
 	
@@ -176,8 +170,6 @@ void client()
 
 	}while(true);
 
-	import std.format;
-	
 	if(!single_packet)
 		{
 		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1024]) ~ to!string(abuffer);
@@ -222,14 +214,12 @@ void client()
 		writefln("Decompression time [%d] ms", sw3.peek.total!"msecs");
 		writeln();
 
-
 		writefln("compressed (sent) size: %d", total_buffer.length);		
 		writefln("extracted         size: %d",  output.length);
 		if(total_buffer.length != 0)writefln("ratio: %d",  output.length / total_buffer.length);		
 		writefln("saved: %d bytes",  output.length - total_buffer.length);		
 		}
 	}
-
 
 void readFile(string filename, Socket mySocket)
 	{
@@ -286,7 +276,7 @@ void readFile(string filename, Socket mySocket)
 			writeln(x.length.sizeof);
 			writeln(format("%b", x.length));
 
-			if(using_compressed == false)
+			if(g.using_compressed == false)
 				payload = format("FN%r%r%r%r", cast(ubyte)filename.length, filename, x.length, x[0 .. $]);
 			else
 				payload = format("FC%r%r%r%r", cast(ubyte)filename.length, filename, y.length, y[0 .. $]);
@@ -310,59 +300,75 @@ void readFile(string filename, Socket mySocket)
 		}
 	}
 
-bool is_server = false;
-bool is_client = false;
-string client_string = "";
-string ip_string = "127.0.0.1";
-ushort port = 8001;
-bool using_compressed = true;
-string path = ".";
-import std.getopt;
+struct globalstate
+	{
+	bool is_server = false;
+	bool is_client = false;
+	string client_string = "";
+	string ip_string = "127.0.0.1";
+	ushort port = 8001;
+	bool using_compressed = true;
+	string path = ".";
+	}
+
+globalstate g;
 
 int main(string[] args)
 	{
-	//https://dlang.org/phobos/std_getopt.html#.GetoptResult
+	import std.getopt;
 	GetoptResult helpInformation;
+	string usageInfo = "Usage\ndfile [opts] file1 [file2 .. etc]";
+	
 	try{
-	helpInformation = getopt(args,
-		std.getopt.config.bundling, // allow combined arguments -cpzspfnapsfon
-		"s", "run as server", &is_server,
-		"c", "run as client (specify IP to connect to, e.g. -c=192.168.1.1) ", &client_string,
-		"p", "specify port (default: 8000)", &port,
-		"z", "use compression (default: yes)", &using_compressed,
-		"f", "destination folder path (default: .)", &path);
-		
-}catch(GetOptException e)
-{
-	writefln("Exception [%s]", e);
-}
+		helpInformation = getopt(args,
+			std.getopt.config.bundling, // allow combined arguments -cpzspfnapsfon
+			"s", "run as server", &g.is_server,
+			"c", "run as client (specify IP to connect to, e.g. -c=192.168.1.1) ", &g.client_string,
+			"p", format("specify port (default: %d)", g.port), &g.port,
+			"z", "use compression (default: yes)", &g.using_compressed,
+			"f", "destination folder path (default: .)", &g.path);			
+	}catch(GetOptException e){
+		writefln("Exception [%s]", e);
+	}
 	
-	if(client_string != "")
+	if(g.client_string != "")
 		{
-		is_client = true;
-		ip_string = client_string;
+		g.is_client = true;
+		g.ip_string = g.client_string;
 		}
 	
-	if(client_string == "localhost")
+	if(g.client_string == "localhost")
 		{
-		ip_string = "127.0.0.1";
+		g.ip_string = "127.0.0.1";
 		}
 	
-	if(is_server && is_client){writeln("fuck you.");}
-		
-	if(is_client)
+	if(g.is_server && g.is_client)
 		{
-		client();
+		writeln("Bad llama."); 
+		defaultGetoptPrinter("Usage\ndfile [opts] file1 [file2 .. etc]", helpInformation.options);
+		return -1;
+		}
+	if(!g.is_server && !g.is_client)
+		{
+		defaultGetoptPrinter(usageInfo, helpInformation.options);
+		return -1;
 		}
 
-	if(is_server)
+	if(g.is_client)client(g.ip_string, g.port);
+	if(g.is_server)
 		{
-		server(args[1]); //getopt REMOVES ARGS that are recognized and leaves the rest!
+		if(args.length > 1)server(args[1], g.ip_string, g.port); //getopt removes args that are recognized and leaves the rest
+		else
+			{
+			writeln("ERROR: You need to specify file(s)!");
+			defaultGetoptPrinter(usageInfo, helpInformation.options);
+			return 0;
+			}
 		}
 		
 	if (helpInformation.helpWanted)
 		{
-		defaultGetoptPrinter("Some information about the program.", helpInformation.options);
+		defaultGetoptPrinter(usageInfo, helpInformation.options);
 		return 0;
 		}
 
