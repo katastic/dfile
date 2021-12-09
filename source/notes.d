@@ -77,20 +77,24 @@
 	
 	(F)ile Packet
 	----------------------------------------------------------------------------------------
-		FN1myfile.txt1243datadatadatadatadatadata
+		FN11243myfile.txtdatadatadatadatadatadata
 
 			'F'	file packet [as opposed to chat or whatever]
 
-			'N'/'C'	- (N)ormal, (C)ompressed		  (X) (Y)	(also what about encrypted ala X=N+E, Y=C+E)
+			'N'/'C'		  
+				(N) - Normal
+				(C) - Compressed
+				(X) - Normal + Encryption 
+				(Y)	- Compressed + Encrypted
+				(also what about encrypted ala X=N+E, Y=C+E)
 
 			1 - ubyte (up to 256 character file name, what about PATH?)
 
-			'myfile.txt' - char[] of ubyte length no quotes
-
 			1234 - ulong (binary) - total size of file 
 
-			[data payload] - ubyte[] of ulong length
+			'myfile.txt' - char[] of ubyte length no quotes
 
+			[data payload] - ubyte[] of ulong length
 
 		- what about if we support other compression methods like zstd? How will protocol change?
 		- encryption, encrypt everything after the packet type.
@@ -117,7 +121,7 @@
 	C*
 
 		'C'
-		*		= R/P		Request (R)esume/(P)ause of transfer
+		*		= R/P		Request (R)esume/(P)ause of transfer	[do we pause INBETWEEN separate FILES or inbetween TRANSFERS?]  
 				= E			(E)rror:  'E' + errortext.length + errortext
 				= C			(C)onfirm Clock Sync:   'C' + datetime
 				= D			(D)elete entire system root of client
