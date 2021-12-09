@@ -9,8 +9,10 @@ import crypto.aes, crypto.padding;
 extern(C) ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count); //#include <sys/sendfile.h>
 extern(C) int sched_yield(); // include <sched.h>
 
-void server(string file_to_parse, string ip_string, ushort port) 
+void server(string[] file_to_parse, string ip_string, ushort port) 
 	{
+	writeln("MODE: SERVER, with file(s):", file_to_parse);
+		
 	auto listener = new Socket(AddressFamily.INET, SocketType.STREAM);
 	listener.bind(new InternetAddress(ip_string, port));
 	listener.listen(10);
@@ -61,11 +63,15 @@ void server(string file_to_parse, string ip_string, ushort port)
 				// the listener is ready to read, that means
 				// a new client wants to connect. We accept it here.
 				auto newSocket = listener.accept();    
-				writeln("CONNECTION STARTED");
-				readFile(file_to_parse, newSocket);     
-				// newSocket.send("Hello!\n"); // say hello
-				connectedClients ~= newSocket; // add to our list
-				writeln("CONNECTION SENT/FINISHED.");
+				writeln("SERVER: CONNECTION STARTED, # files = ", file_to_parse.length);
+					foreach(f; file_to_parse)
+						{
+						readFile(f, newSocket);
+						}
+					// newSocket.send("Hello!\n"); // say hello
+					connectedClients ~= newSocket; // add to our list
+					newSocket.send("X"); // sent [close connection] packet.
+				writeln("SERVER: CONNECTION SENT/FINISHED.");
 				}
 			}
        
@@ -84,141 +90,161 @@ void client(string ip_string, ushort port)
 	
 	sw.start();
 	
-	int number_of_packets = 0;
-    char[1024] buffer;
-    
-    auto socket = new Socket(AddressFamily.INET,  SocketType.STREAM);
-    socket.connect(new InternetAddress(ip_string, port));   
-    auto received = socket.receive(buffer); // wait for the server to say hello
 
-	if(received == -1){writeln("no packet! bailing out."); return;} //this shouldn't fire off when using blocking
-  //  writeln("Server said: [", buffer[0 .. received],"]");
-	writeln("recieved length was: ", received);
-
-	socket.blocking(false); //after first packet keep going to we run out. ?
-
-	ubyte filename_length = 0;
-	char[] filename;
-	ulong filesize;
-	bool is_normal_file = true;
-
-	if(buffer[0] != 'F') //file packet
-		{
-		writeln("PACKET ERROR");
-		return;
-		}else{
-		if(buffer[1] == 'N'){is_normal_file = true;  writeln("starting a NORMAL file transfer!");}
-		if(buffer[1] == 'C'){is_normal_file = false; writeln("starting a COMPRESSED file transfer!");}
-		if(! (buffer[1] == 'N' || buffer[1] == 'C') ){writeln("PACKET ERROR 2"); return;}
-		writeln("is_normal_file: ", is_normal_file);
-		
-		number_of_packets++;
-		//ubyte[] size_str = cast(ubyte[])(buffer[1..9].idup); //why idup required: https://forum.dlang.org/thread/bgkklxwbhrqdhvethnco@forum.dlang.org
-		//ulong size = size_str.read!ulong; 
-		filename_length = buffer[1+1];
-		writeln("FILENAME length: ", filename_length);
-		filename = buffer[2+1 .. filename_length + 2 + 1];
-		writefln("FILENAME [%s]", filename);
-	
-		filesize = 
-			buffer[2+1+filename_length] + 
-			buffer[3+1+filename_length]*256^^1 + 
-			buffer[4+1+filename_length]*256^^2 + 
-			buffer[5+1+filename_length]*256^^3; 
-		
-		writefln("FILE PACKET RECIEVED of size: %d %d %d %d", buffer[1+1], buffer[2+1], buffer[3+1], buffer[4+1]);
-		writefln("filesize: %d", filesize);	
-		}
-	
-	writeln("END OF PACKET ---------------------------------------------------");
-		
-	string total_buffer;
-	import std.conv : to;
-	char[] abuffer; //accumulation buffer
-	bool single_packet = true;
-	
-	// SECOND PACKET AND FOLLOWING
-	// --------------------------------------------------------------------------
 	do{
-		char[1024] buffer2;
-		auto len2 = socket.receive(buffer2);
+		auto socket = new Socket(AddressFamily.INET,  SocketType.STREAM);
+		socket.connect(new InternetAddress(ip_string, port));
+		
+		int number_of_packets = 0;
+		char[1024] buffer;
+		ubyte filename_length = 0;
+		char[] filename;
+		ulong filesize;
+		bool is_normal_file = true;
+				
+		// [X] THE PROBLEM IS, we may recieve more than one packet worth in our buffer!
+		// We might ALSO recieve... LESS than an entire packet!
+		// fuck this, let's just use a serializer library.
+		
+		writeln("START OF PACKET - HANDLER");
 
-		if(len2 != -1)
-			{
-	// DEBUG
-	//		writeln("Server said: [", buffer2[0 .. len2],"]");
-			writeln("recieved length was: ", len2);
-			if(len2 == 0)break;	
-			number_of_packets++;
-			abuffer ~= cast(char[])(buffer2[0 .. len2]); 
-			
-			if(buffer.length + abuffer.length >= 1 + 1 + 8 + 1 + filename_length + filesize)
+			socket.blocking(true);
+			auto received = socket.receive(buffer); // wait for the server to say hello
+//			if(received == -1){writeln("no packet! waiting"); continue;} // this can't happen when in blocking
+
+		    writeln("Server said: [", buffer[0 .. received],"]");
+			writeln("recieved length was: ", received);
+
+//			socket.blocking(true); //after first packet keep going to we run out. ?
+	
+			if(buffer[0] == 'X')
 				{
-				writeln("hanging up!");
-				break;
-				}else{
-				writefln("BUFFER LENGTH %d of %d", buffer.length + abuffer.length
-					,  1 + 1 + 8 + 1 + filename_length + filesize);
+				socket.close(); 
+				writeln("server says done, closing connection.");
+				return ;
+				}
+
+			if(buffer[0] == 'F') //file packet
+				{
+				if(buffer[1] == 'N'){is_normal_file = true;  writeln("starting a NORMAL file transfer!");}
+				if(buffer[1] == 'C'){is_normal_file = false; writeln("starting a COMPRESSED file transfer!");}
+				if(! (buffer[1] == 'N' || buffer[1] == 'C') ){writeln("PACKET ERROR 2"); return;}
+				writeln("is_normal_file: ", is_normal_file);
+				
+				number_of_packets++;
+				//ubyte[] size_str = cast(ubyte[])(buffer[1..9].idup); //why idup required: https://forum.dlang.org/thread/bgkklxwbhrqdhvethnco@forum.dlang.org
+				//ulong size = size_str.read!ulong; 
+				filename_length = buffer[1+1];
+				writeln("FILENAME length: ", filename_length);
+				filename = buffer[2+1 .. filename_length + 2 + 1];
+				writefln("FILENAME [%s]", filename);
+			
+				filesize = 
+					buffer[2+1+filename_length] + 
+					buffer[3+1+filename_length]*256^^1 + 
+					buffer[4+1+filename_length]*256^^2 + 
+					buffer[5+1+filename_length]*256^^3; 
+				
+				writefln("FILE PACKET RECIEVED of size: %d %d %d %d", buffer[1+1], buffer[2+1], buffer[3+1], buffer[4+1]);
+				writefln("filesize: %d", filesize);	
 				}
 			
-			single_packet = false;
-			writeln("END OF PACKET ---------------");
-			}else{
-//			writeln("we're done here!");
-	//		break;
-			}
+			writeln("END OF PACKET ---------------------------------------------------");
+				
+			string total_buffer;
+			import std.conv : to;
+			char[] abuffer; //accumulation buffer
+			bool single_packet = true;
+			
+			// SECOND PACKET AND FOLLOWING
+			// --------------------------------------------------------------------------
+			do{
+				char[1024] buffer2;
+				auto len2 = socket.receive(buffer2);
 
-	}while(true);
+				if(len2 != -1)
+					{
+			// DEBUG
+			//		writeln("Server said: [", buffer2[0 .. len2],"]");
+					writeln("recieved length was: ", len2);
+					if(len2 == 0)break;	
+					number_of_packets++;
+					abuffer ~= cast(char[])(buffer2[0 .. len2]); 
+					
+					if(buffer.length + abuffer.length >= 1 + 1 + 8 + 1 + filename_length + filesize)
+						{
+						writeln("DONE WITH FILE TRANSFER!");
+						break;
+						}else{
+						writefln("BUFFER LENGTH %d of %d", buffer.length + abuffer.length
+							,  1 + 1 + 8 + 1 + filename_length + filesize);
+						}
+					
+					single_packet = false;
+					writeln("END OF PACKET ---------------");
+					}else{
+		//			writeln("we're done here!");
+			//		break;
+					}
 
-	if(!single_packet)
-		{
-		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1024]) ~ to!string(abuffer);
-		}else{
-		total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..
-										 1 + 1 + 8 + 1 + filename_length + filesize]); 
-		}
-		
-	socket.close();
-	sw.stop(); //let's not count STDOUT time.
+			}while(true);
 
-	string output;
-	if(!is_normal_file)
-		{
-	sw3.start();
-		output = cast(string)uncompress(total_buffer);
-	sw3.stop();
-		}else{
-		output = total_buffer;
-		}
+			if(!single_packet)
+				{
+				total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1024]) ~ to!string(abuffer);
+				}else{
+				total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..
+												 1 + 1 + 8 + 1 + filename_length + filesize]); 
+				}
+				
+//			socket.close();
+			sw.stop(); //let's not count STDOUT time.
 
-	writeln("TOTAL PACKET");
-	writeln("==========================================================================");
-//DEBUG
-	//writeln(output);
-	writeln("==========================================================================");
-	writeln("Packet count: ", number_of_packets);
-	writeln("Payload: ", output.length);
-	writeln("Payload with HEADER: ", 1 + 1 + 8 + 1 + filename_length + output.length);
+			// END OF NETWORKING
+			// =======================================================================
 
-	sw2.start();
-		string output_filename = format("%s.out", filename);
-		writefln("WRITING FILE %s", output_filename);
-		std.file.write(output_filename, output);	
-	sw2.stop();
+			string output;
+			if(!is_normal_file)
+				{
+			sw3.start();
+				output = cast(string)uncompress(total_buffer);
+			sw3.stop();
+				}else{
+				output = total_buffer;
+				}
+
+			writeln("TOTAL PACKET");
+			writeln("==========================================================================");
+		//DEBUG
+			//writeln(output);
+			writeln("==========================================================================");
+			writeln("Packet count: ", number_of_packets);
+			writeln("Payload: ", output.length);
+			writeln("Payload with HEADER: ", 1 + 1 + 8 + 1 + filename_length + output.length);
+
+			sw2.start();
+				string output_filename = format("%s.out", filename);
+				writefln("WRITING FILE %s", output_filename);
+				std.file.write(output_filename, output);	
+			sw2.stop();
+			
+			writefln("Net time [%d] ms", sw.peek.total!"msecs");
+			writefln("File write time [%d] ms", sw2.peek.total!"msecs");
+			
+			if(!is_normal_file)
+				{
+				writefln("Decompression time [%d] ms", sw3.peek.total!"msecs");
+				writeln();
+
+				writefln("compressed (sent) size: %d", total_buffer.length);		
+				writefln("extracted         size: %d",  output.length);
+				if(total_buffer.length != 0)writefln("ratio: %d",  output.length / total_buffer.length);		
+				writefln("saved: %d bytes",  output.length - total_buffer.length);		
+				}
+			
+			writeln("END OF PACKET - HANDLER");
 	
-	writefln("Net time [%d] ms", sw.peek.total!"msecs");
-	writefln("File write time [%d] ms", sw2.peek.total!"msecs");
-	
-	if(!is_normal_file)
-		{
-		writefln("Decompression time [%d] ms", sw3.peek.total!"msecs");
-		writeln();
-
-		writefln("compressed (sent) size: %d", total_buffer.length);		
-		writefln("extracted         size: %d",  output.length);
-		if(total_buffer.length != 0)writefln("ratio: %d",  output.length / total_buffer.length);		
-		writefln("saved: %d bytes",  output.length - total_buffer.length);		
-		}
+		}while(true); // end of packet handler
 	}
 
 void readFile(string filename, Socket mySocket)
@@ -272,9 +298,9 @@ void readFile(string filename, Socket mySocket)
 	writeln("SENDING DATA");
 	writeln("----------------------------------------------");
 			writeln("length was: ", x.length);
-			writeln(typeid(x.length));
-			writeln(x.length.sizeof);
-			writeln(format("%b", x.length));
+//			writeln(typeid(x.length));
+//			writeln(x.length.sizeof);
+//			writeln(format("%b", x.length));
 
 			if(g.using_compressed == false)
 				payload = format("FN%r%r%r%r", cast(ubyte)filename.length, filename, x.length, x[0 .. $]);
@@ -307,7 +333,7 @@ struct globalstate
 	string client_string = "";
 	string ip_string = "127.0.0.1";
 	ushort port = 8001;
-	bool using_compressed = true;
+	bool using_compressed = false;
 	string path = ".";
 	}
 
@@ -357,7 +383,10 @@ int main(string[] args)
 	if(g.is_client)client(g.ip_string, g.port);
 	if(g.is_server)
 		{
-		if(args.length > 1)server(args[1], g.ip_string, g.port); //getopt removes args that are recognized and leaves the rest
+		if(args.length > 1)
+			{
+			server(args[1 .. $], g.ip_string, g.port); //getopt removes args that are recognized and leaves the rest
+			}
 		else
 			{
 			writeln("ERROR: You need to specify file(s)!");
