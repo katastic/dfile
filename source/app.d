@@ -70,7 +70,8 @@ void server(string[] file_to_parse, string ip_string, ushort port)
 						}
 					// newSocket.send("Hello!\n"); // say hello
 					connectedClients ~= newSocket; // add to our list
-					newSocket.send("X"); // sent [close connection] packet.
+					
+					newSocket.send( format("X\x00\x00\x00\x00\x00\x00") ); // sent [close connection] packet.
 				writeln("SERVER: CONNECTION SENT/FINISHED.");
 				}
 			}
@@ -89,119 +90,147 @@ void client(string ip_string, ushort port)
 	StopWatch sw3;
 	
 	sw.start();
-	
-
-	do{
+//	do{
 		auto socket = new Socket(AddressFamily.INET,  SocketType.STREAM);
 		socket.connect(new InternetAddress(ip_string, port));
 		
-		int number_of_packets = 0;
+		//int number_of_packets = 0;
 		char[1024] buffer;
-		ubyte filename_length = 0;
-		char[] filename;
-		ulong filesize;
+		//ubyte filename_length = 0;
+		//char[] filename;
+		//ulong filesize;
 		bool is_normal_file = true;
 				
 		// [X] THE PROBLEM IS, we may recieve more than one packet worth in our buffer!
 		// We might ALSO recieve... LESS than an entire packet!
 		// fuck this, let's just use a serializer library.
 		
-		writeln("START OF PACKET - HANDLER");
-
-			socket.blocking(true);
-			auto received = socket.receive(buffer); // wait for the server to say hello
-//			if(received == -1){writeln("no packet! waiting"); continue;} // this can't happen when in blocking
-
-		    writeln("Server said: [", buffer[0 .. received],"]");
-			writeln("recieved length was: ", received);
-
-//			socket.blocking(true); //after first packet keep going to we run out. ?
-	
-			if(buffer[0] == 'X')
+		bool handle_packet(string data)
+			{
+			if(data[0] == 'F')  //file
 				{
-				socket.close(); 
-				writeln("server says done, closing connection.");
+				ubyte flen = data[2]; //filename length
+				writeln("flen:", flen);
+				uint plen =  //payload length
+					data[3 ] +
+					data[3 + 1]*256 + 
+					data[3 + 2]*256*256 + 
+					data[3 + 3]*256*256*256;
+				writeln("plen:", plen);
+				
+				string filename = data[3+4+4 .. 3+4+4+flen];
+				string payload = data[3+4+4+flen .. $];
+				
+				if(data[1] != 'C' && data[1] != 'N')
+					{
+					assert(false, "PACKET ERROR in compression identifier!");
+					}
+				
+				if(data[1] == 'C') //compressed file
+					{
+					payload = cast(string)uncompress(payload); 
+					}
+
+				writefln("filename [[%s]]", filename);
+				if(payload.length < 2000)writefln("payload [[%s]] of len=%d", payload, payload.length);
+				
+				string output_filename = format("%s.out", filename);
+				writefln("WRITING FILE [%s]", output_filename);
+				std.file.write(output_filename, payload);	
+				}
+				
+			if(data[0] == 'X') return 1; // exit/close connection
+		
+			return 0;
+			}
+		
+		string zbuffer = ""; // everything we have so far
+		bool done = false;		
+		socket.blocking(true);
+		
+		uint current_packet_seek_length = 1253152;
+
+		do{
+			if(zbuffer.length < 2000)writefln("waiting for packet. Buffer (len=%d) is [%s] ", zbuffer.length, zbuffer);
+			auto buffer_length = socket.receive(buffer); // wait for the server to say hello
+			writeln("got : ", buffer_length);
+			
+			zbuffer ~= buffer[0 .. buffer_length];
+				
+			if(zbuffer.length < 2000)
+				{
+				writefln("buffer: <<%s>> ", buffer[0 .. buffer_length]);
+				writefln("zbuffer: <<%s>> ", zbuffer);
+				}
+	//	payload = format("FN%r%r%r%r", cast(ubyte)filename.length, filename, x.length, x[0 .. $]);
+	//				      012 
+	/+
+						    x 1
+						     filename[x]
+							  y 1234
+							    data[y]
+	+/
+
+			chop:
+			if(zbuffer.length < 7) continue; //not enough data to form a packet header!
+
+//	payload = format("FN%r%r%r%r", cast(ubyte)filename.length, x.length, filename, x[0 .. $]);
+
+
+			if(zbuffer[0] != 'F' && zbuffer[0] != 'X')
+				{
+				writefln("malformed packet. We got [%s] for packet header.", zbuffer[0]);
+				}
+			
+			if(zbuffer[0] == 'X')
+				{
+				socket.close();
+				writeln("we got the kill signal!");
 				return ;
 				}
 
-			if(buffer[0] == 'F') //file packet
+			ubyte flen = zbuffer[2]; //filename length
+			writeln("flen:", flen);
+
+			if(zbuffer[0] == 'F')
 				{
-				if(buffer[1] == 'N'){is_normal_file = true;  writeln("starting a NORMAL file transfer!");}
-				if(buffer[1] == 'C'){is_normal_file = false; writeln("starting a COMPRESSED file transfer!");}
-				if(! (buffer[1] == 'N' || buffer[1] == 'C') ){writeln("PACKET ERROR 2"); return;}
-				writeln("is_normal_file: ", is_normal_file);
-				
-				number_of_packets++;
-				//ubyte[] size_str = cast(ubyte[])(buffer[1..9].idup); //why idup required: https://forum.dlang.org/thread/bgkklxwbhrqdhvethnco@forum.dlang.org
-				//ulong size = size_str.read!ulong; 
-				filename_length = buffer[1+1];
-				writeln("FILENAME length: ", filename_length);
-				filename = buffer[2+1 .. filename_length + 2 + 1];
-				writefln("FILENAME [%s]", filename);
-			
-				filesize = 
-					buffer[2+1+filename_length] + 
-					buffer[3+1+filename_length]*256^^1 + 
-					buffer[4+1+filename_length]*256^^2 + 
-					buffer[5+1+filename_length]*256^^3; 
-				
-				writefln("FILE PACKET RECIEVED of size: %d %d %d %d", buffer[1+1], buffer[2+1], buffer[3+1], buffer[4+1]);
-				writefln("filesize: %d", filesize);	
+				current_packet_seek_length = 
+					3 + 	// 'F' 'N' x (where x=filename length)
+					4 + 	// 1234 bytes of packet length
+					4 + 	// why 4??? is this 8 byte packet length???
+					flen +	// 'filename.txt'
+					zbuffer[3 ] +
+					zbuffer[3 + 1]*256 + 
+					zbuffer[3 + 2]*256*256 + 
+					zbuffer[3 + 3]*256*256*256; 
 				}
-			
-			writeln("END OF PACKET ---------------------------------------------------");
 				
-			string total_buffer;
-			import std.conv : to;
-			char[] abuffer; //accumulation buffer
-			bool single_packet = true;
-			
-			// SECOND PACKET AND FOLLOWING
-			// --------------------------------------------------------------------------
-			do{
-				char[1024] buffer2;
-				auto len2 = socket.receive(buffer2);
-
-				if(len2 != -1)
-					{
-			// DEBUG
-			//		writeln("Server said: [", buffer2[0 .. len2],"]");
-					writeln("recieved length was: ", len2);
-					if(len2 == 0)break;	
-					number_of_packets++;
-					abuffer ~= cast(char[])(buffer2[0 .. len2]); 
-					
-					if(buffer.length + abuffer.length >= 1 + 1 + 8 + 1 + filename_length + filesize)
-						{
-						writeln("DONE WITH FILE TRANSFER!");
-						break;
-						}else{
-						writefln("BUFFER LENGTH %d of %d", buffer.length + abuffer.length
-							,  1 + 1 + 8 + 1 + filename_length + filesize);
-						}
-					
-					single_packet = false;
-					writeln("END OF PACKET ---------------");
-					}else{
-		//			writeln("we're done here!");
-			//		break;
-					}
-
-			}while(true);
-
-			if(!single_packet)
+			writefln("buffer length: <<%d>> ", buffer_length);
+			writefln("current_packet_seek_length: <<%d>> ", current_packet_seek_length);
+			  
+			if(zbuffer.length > current_packet_seek_length)
 				{
-				total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..  1024]) ~ to!string(abuffer);
+				string pbuffer = zbuffer[0 .. current_packet_seek_length]; //single packet of data;
+				zbuffer = zbuffer[current_packet_seek_length .. $]; // shrink zbuffer
+				writeln("---------------------------------------------------");
+				if(pbuffer.length < 2000)writefln("dealing with packet of [%s]", pbuffer);
+				writeln("---------------------------------------------------");
+				
+				if(handle_packet(pbuffer))done = true;
+				//time to parse!
+				
+				if(zbuffer.length < 2000)writefln("new zbuffer was [%s]", zbuffer);
+				goto chop;
 				}else{
-				total_buffer = to!string(buffer[ 1 + 1 + 8 + 1 + filename_length  ..
-												 1 + 1 + 8 + 1 + filename_length + filesize]); 
+				continue; //we need more data
 				}
-				
-//			socket.close();
-			sw.stop(); //let's not count STDOUT time.
-
-			// END OF NETWORKING
-			// =======================================================================
+			
+		}while(!done);
+		
+		
+		
+		
+		/+
 
 			string output;
 			if(!is_normal_file)
@@ -245,6 +274,7 @@ void client(string ip_string, ushort port)
 			writeln("END OF PACKET - HANDLER");
 	
 		}while(true); // end of packet handler
+	+/
 	}
 
 void readFile(string filename, Socket mySocket)
@@ -302,10 +332,10 @@ void readFile(string filename, Socket mySocket)
 //			writeln(x.length.sizeof);
 //			writeln(format("%b", x.length));
 
-			if(g.using_compressed == false)
-				payload = format("FN%r%r%r%r", cast(ubyte)filename.length, filename, x.length, x[0 .. $]);
+			if(g.using_compression == false)
+				payload = format("FN%r%r%r%r", cast(ubyte)filename.length, x.length, filename, x[0 .. $]);
 			else
-				payload = format("FC%r%r%r%r", cast(ubyte)filename.length, filename, y.length, y[0 .. $]);
+				payload = format("FC%r%r%r%r", cast(ubyte)filename.length, y.length, filename, y[0 .. $]);
 				// note we're using y and y.length, not x here
 					
 			for(int i = 0; i < payload.length; i += 1024)
@@ -333,7 +363,7 @@ struct globalstate
 	string client_string = "";
 	string ip_string = "127.0.0.1";
 	ushort port = 8001;
-	bool using_compressed = false;
+	bool using_compression = true;
 	string path = ".";
 	}
 
@@ -351,7 +381,7 @@ int main(string[] args)
 			"s", "run as server", &g.is_server,
 			"c", "run as client (specify IP to connect to, e.g. -c=192.168.1.1) ", &g.client_string,
 			"p", format("specify port (default: %d)", g.port), &g.port,
-			"z", "use compression (default: yes)", &g.using_compressed,
+			"z", "use compression (default: yes)", &g.using_compression,
 			"f", "destination folder path (default: .)", &g.path);			
 	}catch(GetOptException e){
 		writefln("Exception [%s]", e);
