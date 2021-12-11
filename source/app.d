@@ -97,11 +97,15 @@ void client(string ip_string, ushort port)
 			{
 			ubyte flen = data[2]; //filename length
 			writeln("flen:", flen);
-			uint plen =  //payload length
+			ulong plen =  //payload length (EIGHT. BYTES.)
 				data[3 ] +
-				data[3 + 1]*256 + 
-				data[3 + 2]*256*256 + 
-				data[3 + 3]*256*256*256;
+				data[3 + 1]*256^^1 + 
+				data[3 + 2]*256^^2 + 
+				data[3 + 3]*256^^3 +
+				data[3 + 4]*256^^4 +
+				data[3 + 5]*256^^5 + 
+				data[3 + 6]*256^^6 + 
+				data[3 + 7]*256^^7;
 			writeln("plen:", plen);
 			
 			string filename = data[3+4+4 .. 3+4+4+flen];
@@ -159,12 +163,14 @@ void client(string ip_string, ushort port)
 /+
 						x 1
 						 filename[x]
-						  y 1234
+						  y 12345678
 							data[y]
+
+	x.length is >> EIGHT. BYTES. <<
 +/
 
 		chop:
-		if(zbuffer.length < 7) continue; //not enough data to form a packet header!
+		if(zbuffer.length < 7+4) continue; //not enough data to form a packet header!
 
 		if(zbuffer[0] != 'F' && zbuffer[0] != 'X' && zbuffer[0] != 'T')
 			{
@@ -174,18 +180,22 @@ void client(string ip_string, ushort port)
 		if(zbuffer[0] == 'T')
 			{
 			// 01234567890
-			// TC01234texttogo
+			// TC012345687texttogo
 			// TC0		-- header (T, the rest doesn't matter. flen = 0)
-			//	  1234	-- payload length=text length
+			//	  12345678	-- payload length=text length
 			
 			uint payload_length = 
 				zbuffer[3] + 
-				zbuffer[3+1]*256 + 
-				zbuffer[3+2]*256*256 + 
-				zbuffer[3+3]*256*256*256;
+				zbuffer[3+1]*256^^1 + 
+				zbuffer[3+2]*256^^2 + 
+				zbuffer[3+3]*256^^3 +
+				zbuffer[3+4]*256^^4 +
+				zbuffer[3+5]*256^^5 +
+				zbuffer[3+6]*256^^6 +
+				zbuffer[3+7]*256^^7;
 				
 			writefln("TEXT RECEIVED len=%d", payload_length);
-			string payload = zbuffer[3+8 .. 3+8 + payload_length]; 
+			string payload = zbuffer[3+8 .. 3+8 + payload_length]; //trim preceding header 
 			writefln("TEXT RECEIVED [%s] %d", payload, payload.length);
 
 			if(3+8 +payload.length != zbuffer.length)
@@ -218,17 +228,26 @@ void client(string ip_string, ushort port)
 				4 + 	// why 4??? is this 8 byte packet length???
 				flen +	// 'filename.txt'
 				zbuffer[3 ] +
-				zbuffer[3 + 1]*256 + 
-				zbuffer[3 + 2]*256*256 + 
-				zbuffer[3 + 3]*256*256*256; 
+				zbuffer[3 + 1]*256^^1 + 
+				zbuffer[3 + 2]*256^^2 + 
+				zbuffer[3 + 3]*256^^3 + 
+				zbuffer[3 + 4]*256^^4 + 
+				zbuffer[3 + 5]*256^^5 + 
+				zbuffer[3 + 6]*256^^6 + 
+				zbuffer[3 + 7]*256^^7;
 			}
 			
 		if(zbuffer[0] == 'T')
-			{
-			current_packet_seek_length = 3 + 4 + 4 + zbuffer[3 ] +
-				zbuffer[3 + 1]*256 + 
-				zbuffer[3 + 2]*256*256 + 
-				zbuffer[3 + 3]*256*256*256; 
+			{ // TC00
+			current_packet_seek_length = 3 + 4 + 4 + 
+				zbuffer[3 ] +
+				zbuffer[3 + 1]*256^^1 + 
+				zbuffer[3 + 2]*256^^2 + 
+				zbuffer[3 + 3]*256^^3 + 
+				zbuffer[3 + 4]*256^^4 + 
+				zbuffer[3 + 5]*256^^5 + 
+				zbuffer[3 + 6]*256^^6 + 
+				zbuffer[3 + 7]*256^^7; 
 			}
 			
 		writefln("buffer length: <<%d>> ", buffer_length);
@@ -280,30 +299,24 @@ void readFile(string filename, Socket mySocket)
 		auto enc = std.zlib.compress(norm, 9);
 		writeln (enc.length);
 		writeln ("Compression ratio: ", to!float(enc.length) / to!float(norm.length));
-		
 		//TODO FIXME: only run compression when we're using it!
-		
 		writeln();
 		writeln( "ENCRYPTION");
 		writeln( "------------------------------------------------" );
-			
 		string key = "12341234123412341234123412341234"; //must be at least 16 bytes
 		ubyte[] iv = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; //initialization vector
 		ubyte[] message = cast(ubyte[])norm;
-		
 		ubyte[] aes_buffer = AESUtils.encrypt!AES128(message, key, iv, PaddingMode.PKCS7);
 		//ubyte[] decoded_buffer = AESUtils.decrypt!AES128(aes_buffer, key, iv, PaddingMode.PKCS7);
-		
 		writeln("original: ", norm.length);
 //		writeln("aes: ", aes_buffer.length);
 //		writeln("original: ", decoded_buffer.length);
 		writeln("NOTE if length of AES is a few larger, it has to work on blocks of 16 bytes so I'm guessing it pads the source before encryption.");
-				
-		writeln("AES");
+//		writeln("AES");
 //		writeln("aes:", aes_buffer);
-		writeln();
+//		writeln();
 //		writeln("decoded:", decoded_buffer);
-		writeln("vs");
+//		writeln("vs");
 //		writeln("x:      ", x);
 		
 	string payload;
@@ -311,9 +324,9 @@ void readFile(string filename, Socket mySocket)
 	writeln("SENDING DATA");
 	writeln("----------------------------------------------");
 			writeln("length was: ", norm.length);
-//			writeln(typeid(x.length));
-//			writeln(x.length.sizeof);
-//			writeln(format("%b", x.length));
+			writeln(typeid(norm.length));
+			writeln(norm.length.sizeof);
+			writeln(format("%b", norm.length));
 
 			if(g.using_compression == false)
 				payload = format("FN%r%r%r%r", cast(ubyte)filename.length, norm.length, filename, norm[0 .. $]);

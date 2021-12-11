@@ -1,5 +1,19 @@
 
 /+
+
+
+
+	the LENGTH PARAMETER is EIGHT. BYTES.
+
+	EIGHT. ... BYTES.
+
+
+
+
+
+
+
+
 	server CPU usage AFTER sending a file
 		
 		sched_yield		100%
