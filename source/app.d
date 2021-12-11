@@ -8,6 +8,10 @@ import crypto.aes, crypto.padding;
 //extern(C) ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count); //#include <sys/sendfile.h>
 extern(C) int sched_yield(); // include <sched.h>
 
+string key = "12341234123412341234123412341234"; //must be at least 16 bytes
+ubyte[] iv = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; //initialization vector
+immutable uint DEBUG_SIZE = 2000;
+
 void server(string[] file_to_parse, string ip_string, ushort port) 
 	{
 	writeln("MODE: SERVER, with file(s):", file_to_parse);
@@ -74,7 +78,7 @@ void server(string[] file_to_parse, string ip_string, ushort port)
 
 					connectedClients ~= newSocket; // add to our list
 					
-					newSocket.send( format("X\x00\x00\x00\x00\x00\x00") ); // sent [close connection] packet.
+					newSocket.send( format("CX\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00") ); // sent [close connection] packet.
 				writeln("SERVER: CONNECTION SENT/FINISHED.");
 				}
 			}
@@ -111,31 +115,88 @@ void client(string ip_string, ushort port)
 			string filename = data[3+4+4 .. 3+4+4+flen];
 			string payload = data[3+4+4+flen .. $];
 			
-			if(data[1] != 'C' && data[1] != 'N')
+			if(data[1] != 'C' && data[1] != 'N' && data[1] != 'X' && data[1] != 'Y')
 				{
 				assert(false, "PACKET ERROR in compression identifier!");
 				}
 			
-			if(data[1] == 'C') //compressed file
+			if(data[1] == 'N') //normal file
 				{
-				payload = cast(string)uncompress(payload); 
+				writeln("starting normal file");
 				}
 
-			writefln("filename [[%s]]", filename);
-			if(payload.length < 2000)writefln("payload [[%s]] of len=%d", payload, payload.length);
+			if(data[1] == 'C') //compressed file (using -x, this is confusing)
+				{
+				writeln("starting compressed file");
+				payload = cast(string)uncompress(payload); 
+				}
+				
+			if(data[1] == 'X') // encrypted file  (using -y, this is confusing)
+				{
+				writeln("starting normal encrypted file");
+//				writefln("payload: %s", payload); 
+				ubyte[] payload2 = cast(ubyte[])(payload);
+//				writefln("payload2: %s", payload2); 			
+				payload = cast(string)AESUtils.decrypt!AES128(payload2, key, iv, PaddingMode.PKCS7);
+//				writefln("payload-now: %s", payload); 
+				}
+				
+				
+			bool file_failure = false;
+			if(data[1] == 'Y') // compressed then encrypted file
+				{
+				import std.string : assumeUTF;
+				writeln("starting encrypted, compressed file");
+				ubyte[] payload2 = cast(ubyte[])(payload);
+//				writefln("payload: %s", payload);  //string
+//				writefln("payload2: %s", payload2); 
+//				writefln("payload2-string: %s", cast(string)payload2); 
+				ubyte[] temp;
+				try{
+					temp = AESUtils.decrypt!AES128(payload2, key, iv, PaddingMode.PKCS7);
+					payload = cast(string)(uncompress(temp));
+					}catch(Exception e){
+					writeln("FILE FAILED. Decryption exception! Is the key correct?");
+					writeln(e.msg);
+					file_failure = true;
+					}
+//				writefln("uncompress: %s", uncompress(temp));
+//				writefln("payload-now: %s", payload); 
+				}
+
+			if(!file_failure) // TODO: Announce to server of file failure
+				{
+				writefln("filename [[%s]]", filename);
+				if(payload.length < DEBUG_SIZE)writefln("payload [[%s]] of len=%d", payload, payload.length);
 			
-			string output_filename = format("%s.out", filename);
-			writefln("WRITING FILE [%s]", output_filename);
-			std.file.write(output_filename, payload);	
+				string output_filename = format("%s.out", filename);
+				writefln("WRITING FILE [%s]", output_filename);
+				try{
+					std.file.write(output_filename, payload);	 
+					//TODO: could this fail on HDD FULL or HDD permissions?
+					}catch(Exception e){
+					writefln("Writing to DISK FAILURE. [%s]", e.msg);
+					}
+				}
 			}
 			
 		if(data[0] == 'T') //text/chat packet
 			{
 			}
 			
-		if(data[0] == 'C') {} //command packet
+		if(data[0] == 'C') //command packet  (we could put EXIT in here)
+			{
+			if(data[1] == 'X'){writeln("EXIT CONNECTION."); return 1;} // EXIT
 			
-		if(data[0] == 'X') return 1; // exit/close connection
+			if(data[1] == 'R'){} // Read limit (bytes/KB/whatever / sec)
+			if(data[1] == 'W'){} // Write limit
+			if(data[1] == 'P'){} // Pause/resume	PP pause,  PR resume ? (or P0 vs P1 byte value)
+			if(data[1] == 'S'){} // reStart last file
+				// auto pause if client hard drive is full
+				// might need to be able to request restarting the file?
+			} 
+			
+		if(data[0] == 'X') {writeln("EXIT CONNECTION.2"); return 1;} // exit/close connection
 	
 		return 0;
 		}
@@ -147,13 +208,13 @@ void client(string ip_string, ushort port)
 	uint current_packet_seek_length = 1253152;
 
 	do{
-		if(zbuffer.length < 2000)writefln("waiting for packet. Buffer (len=%d) is [%s] ", zbuffer.length, zbuffer);
+		if(zbuffer.length < DEBUG_SIZE)writefln("waiting for packet. Buffer (len=%d) is [%s] ", zbuffer.length, zbuffer);
 		auto buffer_length = socket.receive(buffer); // wait for the server to say hello
 		writeln("got : ", buffer_length);
 		
 		zbuffer ~= buffer[0 .. buffer_length];
 			
-		if(zbuffer.length < 2000)
+		if(zbuffer.length < DEBUG_SIZE)
 			{
 			writefln("buffer: <<%s>> ", buffer[0 .. buffer_length]);
 			writefln("zbuffer: <<%s>> ", zbuffer);
@@ -170,9 +231,9 @@ void client(string ip_string, ushort port)
 +/
 
 		chop:
-		if(zbuffer.length < 7+4) continue; //not enough data to form a packet header!
+		if(zbuffer.length < 7) continue; //not enough data to form a packet header!
 
-		if(zbuffer[0] != 'F' && zbuffer[0] != 'X' && zbuffer[0] != 'T')
+		if(zbuffer[0] != 'F' && zbuffer[0] != 'X' && zbuffer[0] != 'T' && zbuffer[0] != 'C')
 			{
 			writefln("malformed packet. We got [%s] for packet header.", zbuffer[0]);
 			}
@@ -258,7 +319,7 @@ void client(string ip_string, ushort port)
 			string pbuffer = zbuffer[0 .. current_packet_seek_length]; //single packet of data;
 			zbuffer = zbuffer[current_packet_seek_length .. $]; // shrink zbuffer
 			writeln("---------------------------------------------------");
-			if(pbuffer.length < 2000)writefln("dealing with packet of [%s]", pbuffer);
+			if(pbuffer.length < DEBUG_SIZE)writefln("dealing with packet of [%s]", pbuffer);
 			writeln("---------------------------------------------------");
 			
 			if(handle_packet(pbuffer))done = true;
@@ -291,61 +352,81 @@ void readFile(string filename, Socket mySocket)
 	
 	try{
 		auto norm = read(filename);
-
+	ubyte[] enc;
+	if(g.using_compression)
+		{
 		writeln("COMPRESSION");
-		writeln("------------------------------------------------" );
-		
+		writeln("------------------------------------------------" );		
 		writeln(norm.length);
-		auto enc = std.zlib.compress(norm, 9);
+		enc = std.zlib.compress(norm, 9);
 		writeln (enc.length);
 		writeln ("Compression ratio: ", to!float(enc.length) / to!float(norm.length));
 		//TODO FIXME: only run compression when we're using it!
+		}
+		
+	ubyte[] aes_buffer;	
+	if(g.using_encryption)
+		{
 		writeln();
 		writeln( "ENCRYPTION");
 		writeln( "------------------------------------------------" );
-		string key = "12341234123412341234123412341234"; //must be at least 16 bytes
-		ubyte[] iv = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; //initialization vector
-		ubyte[] message = cast(ubyte[])norm;
-		ubyte[] aes_buffer = AESUtils.encrypt!AES128(message, key, iv, PaddingMode.PKCS7);
-		//ubyte[] decoded_buffer = AESUtils.decrypt!AES128(aes_buffer, key, iv, PaddingMode.PKCS7);
-		writeln("original: ", norm.length);
+		
+		ubyte[] message_to_process;
+		if(g.using_compression)
+			{
+			message_to_process = cast(ubyte[])enc;
+			}else{
+			message_to_process = cast(ubyte[])norm;
+			}
+		aes_buffer = AESUtils.encrypt!AES128(message_to_process, key, iv, PaddingMode.PKCS7);
+//		ubyte[] decoded_buffer = AESUtils.decrypt!AES128(aes_buffer, key, iv, PaddingMode.PKCS7);
+//		writeln("original: ", norm.length);
 //		writeln("aes: ", aes_buffer.length);
 //		writeln("original: ", decoded_buffer.length);
-		writeln("NOTE if length of AES is a few larger, it has to work on blocks of 16 bytes so I'm guessing it pads the source before encryption.");
+//		writeln("NOTE if length of AES is a few larger, it has to work on blocks of 16 bytes so I'm guessing it pads the source before encryption.");
 //		writeln("AES");
 //		writeln("aes:", aes_buffer);
 //		writeln();
 //		writeln("decoded:", decoded_buffer);
 //		writeln("vs");
 //		writeln("x:      ", x);
+		writeln("aes_buffer.length: ", aes_buffer.length);
+		}
 		
 	string payload;
 	
 	writeln("SENDING DATA");
 	writeln("----------------------------------------------");
 			writeln("length was: ", norm.length);
-			writeln(typeid(norm.length));
-			writeln(norm.length.sizeof);
-			writeln(format("%b", norm.length));
+	//		writeln(typeid(norm.length));
+		//	writeln(norm.length.sizeof);
+	//		writeln(format("%b", norm.length));
 
-			if(g.using_compression == false)
+			// not encrypted
+			if(g.using_compression == false && g.using_encryption == false)
 				payload = format("FN%r%r%r%r", cast(ubyte)filename.length, norm.length, filename, norm[0 .. $]);
-			else
+			if(g.using_compression == true && g.using_encryption == false)
 				payload = format("FC%r%r%r%r", cast(ubyte)filename.length, enc.length, filename, enc[0 .. $]);
 								
+			// encrypted
+			if(g.using_compression == false && g.using_encryption == true)
+				payload = format("FX%r%r%r%r", cast(ubyte)filename.length, aes_buffer.length, filename, aes_buffer[0 .. $]);
+			if(g.using_compression == true && g.using_encryption == true)
+				payload = format("FY%r%r%r%r", cast(ubyte)filename.length, aes_buffer.length, filename, aes_buffer[0 .. $]);
+
 			for(int i = 0; i < payload.length; i += g.SEND_SIZE)
 				{
 				if(i+g.SEND_SIZE < payload.length)
 					{
 					writefln("sending from %d to %d", i , i+g.SEND_SIZE); 
+					writeln(payload[i .. i+g.SEND_SIZE]);
 					mySocket.send(payload[i .. i+g.SEND_SIZE]);
 					}else{
 					writefln("sending from %d to %d", i , payload.length); 
+					writeln(payload[i .. i+payload.length]);
 					mySocket.send(payload[i .. payload.length]);
 					}
 				}
-			// do we need to chop up packets here? can't we just dump the whole thing into the channel / stream?
-
 		} catch(Exception e) { //why doesn't this catch with a FileException like the online guide? //https://tour.dlang.org/tour/en/basics/exceptions
 		writeln("Exception: ", e);
 		}
@@ -383,6 +464,7 @@ int main(string[] args)
 			"s", "run as server", &g.is_server,
 			"c", "run as client (specify IP to connect to, e.g. -c=192.168.1.1) ", &g.client_string,
 			"p", format("specify port (default: %d)", g.port), &g.port,
+			"k", "set encryption (k)ey= [MUST be >=16 bytes]", &key,
 			"x", "disable encryption", &disable_encryption,
 			"y", "disable compression", &disable_compression,
 			"f", "destination folder path (default: .)", &g.path);			
@@ -391,10 +473,13 @@ int main(string[] args)
 		return -1;
 	}
 	
+	
 	//because getopts will only add true (to default true), not set true to false.
 	if(disable_encryption){ writeln("Disabling encryption"); g.using_encryption = false; }
 	if(disable_compression){ writeln("Disabling compression"); g.using_compression = false; }
 	
+	
+	if(key.length < 16){writeln("ERROR: Key MUST be at least 16 bytes!"); return 0;} 
 	if(g.client_string != ""){g.is_client = true; g.ip_string = g.client_string;}
 	if(g.client_string == "localhost"){g.ip_string = "127.0.0.1";}
 
@@ -406,7 +491,7 @@ int main(string[] args)
 
 	if(g.is_client)
 		{
-//		if(g.ip_string == "" || g.port == 0) writeln("YOU NEED TO SPECIFY PORT AND CLIeNT");  commented out for quick testing.  
+//		if(g.ip_string == "") writeln("YOU NEED TO SPECIFY CLIeNT IP");  commented out for quick testing.  
 		client(g.ip_string, g.port);
 		}
 
