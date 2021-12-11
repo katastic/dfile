@@ -1,3 +1,8 @@
+// [ ] Allow auto overwrite files mode -o (and default to not)
+//		[ ] Overwrite if newer
+// [ ] Output Folder
+// [ ] Send folder (and recursive send/subfolders?)
+ 
 import std.datetime, std.datetime.stopwatch : benchmark, StopWatch;
 import std.stdio, std.format, std.string;
 import std.file, std.socket;
@@ -8,9 +13,25 @@ import crypto.aes, crypto.padding;
 //extern(C) ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count); //#include <sys/sendfile.h>
 extern(C) int sched_yield(); // include <sched.h>
 
-string key = "12341234123412341234123412341234"; //must be at least 16 bytes
-ubyte[] iv = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; //initialization vector
 immutable uint DEBUG_SIZE = 2000;
+immutable int SEND_SIZE_MAX = 32768-1;
+
+struct globalstate
+	{
+	bool is_server = false;
+	bool is_client = false;
+	string client_string = "";
+	string ip_string = "127.0.0.1";
+	ushort port = 8001;
+	bool using_compression = true;
+	bool using_encryption = true;
+	string path = ".";
+	immutable int SEND_SIZE = 32767; //1024;
+	string key = "12341234123412341234123412341234"; //must be at least 16 bytes
+	ubyte[] iv = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; //initialization vector
+	}
+
+globalstate g;
 
 void server(string[] file_to_parse, string ip_string, ushort port) 
 	{
@@ -137,7 +158,7 @@ void client(string ip_string, ushort port)
 //				writefln("payload: %s", payload); 
 				ubyte[] payload2 = cast(ubyte[])(payload);
 //				writefln("payload2: %s", payload2); 			
-				payload = cast(string)AESUtils.decrypt!AES128(payload2, key, iv, PaddingMode.PKCS7);
+				payload = cast(string)AESUtils.decrypt!AES128(payload2, g.key, g.iv, PaddingMode.PKCS7);
 //				writefln("payload-now: %s", payload); 
 				}
 				
@@ -153,7 +174,7 @@ void client(string ip_string, ushort port)
 //				writefln("payload2-string: %s", cast(string)payload2); 
 				ubyte[] temp;
 				try{
-					temp = AESUtils.decrypt!AES128(payload2, key, iv, PaddingMode.PKCS7);
+					temp = AESUtils.decrypt!AES128(payload2, g.key, g.iv, PaddingMode.PKCS7);
 					payload = cast(string)(uncompress(temp));
 					}catch(Exception e){
 					writeln("FILE FAILED. Decryption exception! Is the key correct?");
@@ -170,12 +191,11 @@ void client(string ip_string, ushort port)
 				if(payload.length < DEBUG_SIZE)writefln("payload [[%s]] of len=%d", payload, payload.length);
 			
 				string output_filename = format("%s.out", filename);
-				writefln("WRITING FILE [%s]", output_filename);
+				writefln("WRITING TO FILE [%s]", output_filename);
 				try{
 					std.file.write(output_filename, payload);	 
-					//TODO: could this fail on HDD FULL or HDD permissions?
 					}catch(Exception e){
-					writefln("Writing to DISK FAILURE. [%s]", e.msg);
+					writefln("Writing to DISK failure! [%s]", e.msg);
 					}
 				}
 			}
@@ -378,7 +398,7 @@ void readFile(string filename, Socket mySocket)
 			}else{
 			message_to_process = cast(ubyte[])norm;
 			}
-		aes_buffer = AESUtils.encrypt!AES128(message_to_process, key, iv, PaddingMode.PKCS7);
+		aes_buffer = AESUtils.encrypt!AES128(message_to_process, g.key, g.iv, PaddingMode.PKCS7);
 //		ubyte[] decoded_buffer = AESUtils.decrypt!AES128(aes_buffer, key, iv, PaddingMode.PKCS7);
 //		writeln("original: ", norm.length);
 //		writeln("aes: ", aes_buffer.length);
@@ -432,23 +452,6 @@ void readFile(string filename, Socket mySocket)
 		}
 	}
 
-immutable int SEND_SIZE_MAX = 32768-1;
-
-struct globalstate
-	{
-	bool is_server = false;
-	bool is_client = false;
-	string client_string = "";
-	string ip_string = "127.0.0.1";
-	ushort port = 8001;
-	bool using_compression = true;
-	bool using_encryption = true;
-	string path = ".";
-	immutable int SEND_SIZE = 32767; //1024;
-	}
-
-globalstate g;
-
 int main(string[] args)
 	{
 	import std.getopt;
@@ -464,7 +467,7 @@ int main(string[] args)
 			"s", "run as server", &g.is_server,
 			"c", "run as client (specify IP to connect to, e.g. -c=192.168.1.1) ", &g.client_string,
 			"p", format("specify port (default: %d)", g.port), &g.port,
-			"k", "set encryption (k)ey= [MUST be >=16 bytes]", &key,
+			"k", "set encryption (k)ey= [MUST be >=16 bytes]", &g.key,
 			"x", "disable encryption", &disable_encryption,
 			"y", "disable compression", &disable_compression,
 			"f", "destination folder path (default: .)", &g.path);			
@@ -479,7 +482,7 @@ int main(string[] args)
 	if(disable_compression){ writeln("Disabling compression"); g.using_compression = false; }
 	
 	
-	if(key.length < 16){writeln("ERROR: Key MUST be at least 16 bytes!"); return 0;} 
+	if(g.key.length < 16){writeln("ERROR: Key MUST be at least 16 bytes!"); return 0;} 
 	if(g.client_string != ""){g.is_client = true; g.ip_string = g.client_string;}
 	if(g.client_string == "localhost"){g.ip_string = "127.0.0.1";}
 
