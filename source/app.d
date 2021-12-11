@@ -20,7 +20,6 @@ struct globalstate
 	{
 	bool is_server = false;
 	bool is_client = false;
-	string client_string = "";
 	string ip_string = "127.0.0.1";
 	ushort port = 8001;
 	bool using_compression = true;
@@ -460,12 +459,13 @@ int main(string[] args)
 	
 	bool disable_encryption = false;
 	bool disable_compression = false;
+	string client_string = "";
 	
 	try{
 		helpInformation = getopt(args,
 			std.getopt.config.bundling, // allow combined arguments -cpzspfnapsfon
 			"s", "run as server", &g.is_server,
-			"c", "run as client (specify IP to connect to, e.g. -c=192.168.1.1) ", &g.client_string,
+			"c", "run as client (specify IP to connect to, e.g. -c=192.168.1.1) ", &client_string,
 			"p", format("specify port (default: %d)", g.port), &g.port,
 			"k", "set encryption (k)ey= [MUST be >=16 bytes]", &g.key,
 			"x", "disable encryption", &disable_encryption,
@@ -483,8 +483,8 @@ int main(string[] args)
 	
 	
 	if(g.key.length < 16){writeln("ERROR: Key MUST be at least 16 bytes!"); return 0;} 
-	if(g.client_string != ""){g.is_client = true; g.ip_string = g.client_string;}
-	if(g.client_string == "localhost"){g.ip_string = "127.0.0.1";}
+	if(client_string != ""){g.is_client = true; g.ip_string = client_string;}
+	if(client_string == "localhost"){g.ip_string = "127.0.0.1";}
 
 	if( (!g.is_server && !g.is_client) || (g.is_server && g.is_client))
 		{
